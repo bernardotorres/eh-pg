@@ -1,4 +1,4 @@
-module github.com/giautm/eh-pg
+module github.com/bernardotorres/eh-pg
 
 require (
 	github.com/go-pg/pg v7.1.7+incompatible
