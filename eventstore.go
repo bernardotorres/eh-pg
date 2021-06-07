@@ -30,8 +30,9 @@ var ErrCouldNotSaveAggregate = errors.New("could not save aggregate")
 
 // EventStore implements an eh.EventStore for PostgreSQL.
 type EventStore struct {
-	db      *pg.DB
-	encoder Encoder
+	db           *pg.DB
+	encoder      Encoder
+	eventHandler eh.EventHandler
 }
 
 var _ = eh.EventStore(&EventStore{})
@@ -90,10 +91,15 @@ func (s *EventStore) newDBEvent(ctx context.Context, event eh.Event) (*Aggregate
 }
 
 // NewEventStore creates a new EventStore.
-func NewEventStore(db *pg.DB) (*EventStore, error) {
+func NewEventStore(db *pg.DB, options ...Option) (*EventStore, error) {
 	s := &EventStore{
 		db:      db,
 		encoder: &jsonEncoder{},
+	}
+	for _, option := range options {
+		if err := option(s); err != nil {
+			return nil, fmt.Errorf("error while applying option: %v", err)
+		}
 	}
 	err := s.CreateTables(&orm.CreateTableOptions{
 		IfNotExists: true,
@@ -102,6 +108,18 @@ func NewEventStore(db *pg.DB) (*EventStore, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+// Option is an option setter used to configure creation.
+type Option func(*EventStore) error
+
+// WithEventHandler adds an event handler that will be called when saving events.
+// An example would be to add an event bus to publish events.
+func WithEventHandler(h eh.EventHandler) Option {
+	return func(s *EventStore) error {
+		s.eventHandler = h
+		return nil
+	}
 }
 
 var tables = []interface{}{
@@ -190,6 +208,19 @@ func (s *EventStore) Save(ctx context.Context, events []eh.Event, originalVersio
 			}
 			if err = tx.Insert(&dbEvents); err != nil {
 				return err
+			}
+
+			// Let the optional event handler handle the events. Aborts the transaction
+			// in case of error.
+			if s.eventHandler != nil {
+				for _, e := range events {
+					if err := s.eventHandler.HandleEvent(ctx, e); err != nil {
+						return eh.CouldNotHandleEventError{
+							Err:   err,
+							Event: e,
+						}
+					}
+				}
 			}
 			return nil
 		})
@@ -352,7 +383,7 @@ type event struct {
 	AggregateEvent
 }
 
-// AggrgateID implements the AggrgateID method of the eventhorizon.Event interface.
+// AggregateID implements the AggregateID method of the eventhorizon.Event interface.
 func (e event) AggregateID() uuid.UUID {
 	return e.AggregateEvent.AggregateID
 }
@@ -385,4 +416,9 @@ func (e event) Timestamp() time.Time {
 // String implements the String method of the eventhorizon.Event interface.
 func (e event) String() string {
 	return fmt.Sprintf("%s@%d", e.AggregateEvent.EventType, e.AggregateEvent.Version)
+}
+
+// Metadata implements the AggrgateID method of the eventhorizon.Event interface.
+func (e event) Metadata() map[string]interface{} {
+	return make(map[string]interface{})
 }
